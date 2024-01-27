@@ -2,8 +2,10 @@
 
 namespace App\Http;
 
+use App\Http\Middleware\Queue as MiddlewareQueue;
 use \Closure;
-use Exception;
+use \Exception;
+use \ReflectionFunction;
 
 class Router
 {
@@ -17,16 +19,10 @@ class Router
 
     public function __construct($url)
     {
-        $this->request = new Request();
+        $this->request = new Request($this);
         $this->url = $url;
         $this->setPrefix();
     }
-
-    /**
-     * Set the value of prefix
-     *
-     * @return  self
-     */
     public function setPrefix()
     {
         $parseUrl = parse_url($this->url);
@@ -42,6 +38,18 @@ class Router
                 continue;
             }
         }
+
+        $params['middlewares'] = $params['middlewares'] ?? [];
+
+        $params['variables'] = [];
+
+        $patternVariable = '/{(.*?)}/';
+
+        if(preg_match_all($patternVariable, $route, $matches)) {
+            $route = preg_replace($patternVariable, '(.*?)', $route);
+            $params['variables'] = $matches[1];
+        }
+
         $patternRoute = '/^'.str_replace('/', '\/', $route).'$/';
         $this->routes[$patternRoute][$method] = $params;
     }
@@ -80,8 +88,15 @@ class Router
         $httpMethod = $this->request->getHttpMethod();
 
         foreach ($this->routes as $patternRoute => $methods) {
-            if (preg_match($patternRoute, $uri)) {
-                if ($methods[$httpMethod]){
+            if (preg_match($patternRoute, $uri, $matches)) {
+                if (isset($methods[$httpMethod])){
+                    unset($matches[0]);
+
+                    $keys = $methods[$httpMethod]['variables'];
+
+                    $methods[$httpMethod]['variables'] = array_combine($keys, $matches);
+                    $methods[$httpMethod]['variables']['request'] = $this->request;
+
                     return $methods[$httpMethod];
                 }
                 throw new Exception("Method not allowed", 405);
@@ -102,10 +117,21 @@ class Router
             }
 
             $args = [];
-            return call_user_func_array($route['controller'], $args);
 
+            $reflection = new ReflectionFunction($route['controller']);
+
+            foreach ($reflection->getParameters() as $parameter) {
+                $name = $parameter->getName();
+                $args[$name] = $route['variables'][$name] ?? '';
+            }
+
+            return (new MiddlewareQueue($route['middlewares'], $route['controller'], $args))->next($this->request);
         } catch (Exception $e) {
             return new Response($e->getCode(), $e->getMessage());
         }
+    }
+
+    public function getCurrentUrl() {
+        return $this->url . $this->getUri();
     }
 }
